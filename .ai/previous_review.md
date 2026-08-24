@@ -1,0 +1,27 @@
+# Daily Repo Opportunity Scan: 2026-08-24
+
+No prior `previous_review.md` existed — this is the baseline run. Repo is at `master`/`fa85782` ("Rework Send Changes menu to stop surprise screenshot downloads"), no commits in the last 24h, so this scan covers current-state opportunities rather than a diff of new commits.
+
+## 1. Net-New Opportunities (High Priority)
+
+1. **Orphaned AI/Tokens feature is still wired end-to-end and ships dead weight.** Commit `e39c7ac` ("Remove Tokens and AI tabs") deleted the UI entry points from `src/panel/App.tsx` but left the components live: `src/panel/components/AITab.tsx` (546 lines), `TokensTab.tsx` (172 lines), and `tokens.css` are imported nowhere except themselves. Worse, `src/background/service-worker.ts` still imports `runDesignCritique`/`runNLEdit` from `src/background/ai-service.ts` (267 lines) and handles `AI_CRITIQUE_REQUEST`/`AI_NL_EDIT_REQUEST` — but the *only* sender of those messages was `AITab.tsx` itself, so ~1000 lines of background + panel code are now unreachable from any UI. `src/design-system/index.tsx:51` also still imports `ai.css` despite never rendering `AITab`. Value unlock: delete ~1000 lines, shrink the design-system and panel bundles, remove a dead AI-request code path that could confuse future contributors into thinking AI features are live.
+
+2. **Style-edit re-render cascade defeats the one `React.memo` boundary that exists.** `src/content/main.ts` (`finishStyleApplication`, ~L801) re-sends a brand-new `ElementData` object via `ELEMENT_SELECTED` after *every* style tick (slider drag, color pick). `src/panel/hooks/useElementData.ts:15` stores that new reference as-is, which flows into `DesignTab`'s `data` prop (`App.tsx:519`). `DesignTab` is `React.memo`'d (`DesignTab.tsx:27`) but the memo never short-circuits because the prop identity changes every edit, and none of the 13 section children it fans out to (`ShadowSection`, `StrokeSection`, `TypographyTab`, etc. — zero `memo(` matches in `src/panel/sections/*.tsx`) are memoized either. Net effect: dragging the opacity slider re-renders all 13 sections, including unrelated ones like Shadow and Typography, on every mousemove tick. Value unlock: this is the interaction-heaviest surface in the extension (drag/scrub is the primary input method) — fixing it is a real, user-perceptible responsiveness win, not a nitpick.
+
+3. **Dark-mode accent color drift is an actual visual bug, not just style debt.** `src/content/layers-panel.ts` hardcodes the accent color as `#0c8ce9` in several places within its default (dark-mode) code path (e.g. lines 127, 231, 234, 237, 239) — but `#0c8ce9` is the *light-mode* `--pd-accent` value from `panel.css:81`, not the dark-mode one (`#4f9eff`, `panel.css:13`), which every sibling content-script file (`drag-drop.ts`, `image-replace.ts`) correctly uses. This is a copy/paste-across-themes bug: the layers-panel accent color is visibly wrong in dark mode (the extension's default UI theme). Fix is a 5-line find/replace.
+
+## 2. Design System & UI Consistency
+
+- **No shared color source of truth across the content/panel boundary.** `panel.css` defines the canonical `--pd-*` custom properties, but content scripts (injected into host pages) can't consume CSS variables across that boundary, so every content-script file re-types the hex literally — and `src/content/content.css` comments literally say `/* Matches the panel's primary-accent style (--pd-accent #4f9eff) */`, i.e. the author is hand-copying values by eyeball rather than sharing a source. This is exactly how finding #3 above happened. Refactor: add `src/shared/colors.ts` exporting the palette as plain JS/TS constants (dark + light), have content scripts import from there, and generate/verify `panel.css`'s custom properties against the same source (or a small build step) so drift is caught rather than silently reintroduced.
+- **Six independent hand-rolled "click outside to close" implementations** with no shared hook: `App.tsx:230`, `TypographyTab.tsx:127`, `UnitInput.tsx:70`, `SpacingSection.tsx:69`, `ColorPicker.tsx:312`, `FontPicker.tsx:22`, `StrokeSection.tsx:107` — each re-implements `document.addEventListener("mousedown", ...) + ref.contains(e.target)`. Extract a `useClickOutside(ref, onClose)` hook into `src/panel/hooks/` (which already holds `useElementData.ts`/`useStyleChange.ts`) and swap all seven call sites over.
+- **Two parallel listbox implementations that should be one component.** `NumberInput.tsx:222-240` (page-value suggestions) and `UnitInput.tsx:225-244` (unit picker) both hand-build a ~20-line `<ul role="listbox">` with identical `role="option"`/active-class/`onMouseDown`+`preventDefault` structure. Worth consolidating into a shared `Listbox` primitive in `src/panel/controls/` before a third caller copies the pattern again.
+
+## 3. Status of Previous Flags
+
+N/A — no `previous_review.md` existed before this run. This report is the baseline; future runs should diff against it.
+
+## 4. Suggested Action/Execution Plan
+
+```bash
+claude -p "Delete the orphaned AI/Tokens feature: remove src/panel/components/AITab.tsx, TokensTab.tsx, tokens.css, and ai.css; drop the ai.css import in src/design-system/index.tsx; remove the AI_CRITIQUE_REQUEST/AI_NL_EDIT_REQUEST handlers and ai-service import from src/background/service-worker.ts; delete src/background/ai-service.ts; then run npm run typecheck and npm run build to confirm nothing else references the removed files."
+```
